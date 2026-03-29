@@ -1,4 +1,4 @@
-const CACHE = 'lumi-v1';
+const CACHE = 'lumi-v2';  // bumped from v1 → forces fresh install
 const ASSETS = [
   '/',
   '/index.html',
@@ -9,38 +9,59 @@ const ASSETS = [
   'https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;1,400;1,600&family=Outfit:wght@300;400;500;600&display=swap'
 ];
 
-// Install — cache core assets
+// Install — cache core assets and skip waiting immediately
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE)
+      .then(cache => cache.addAll(ASSETS))
+      .then(() => self.skipWaiting())  // don't wait for old SW to die
   );
 });
 
-// Activate — clean old caches
+// Activate — delete old caches, claim all open tabs immediately
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys =>
+        Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      )
+      .then(() => self.clients.claim())  // take control of already-open tabs
   );
 });
 
-// Fetch — cache-first for assets, network-first for everything else
+// Fetch — network-first for HTML (so updates are always seen), cache-first for assets
 self.addEventListener('fetch', e => {
-  // Skip non-GET and cross-origin except fonts
   if (e.request.method !== 'GET') return;
 
-  e.respondWith(
-    caches.match(e.request).then(cached => {
-      if (cached) return cached;
-      return fetch(e.request).then(response => {
-        // Cache successful responses for our own assets
-        if (response && response.status === 200 && response.type !== 'opaque') {
-          const clone = response.clone();
-          caches.open(CACHE).then(cache => cache.put(e.request, clone));
-        }
-        return response;
-      }).catch(() => cached || new Response('Offline', { status: 503 }));
-    })
-  );
+  const url = new URL(e.request.url);
+  const isHTML = e.request.destination === 'document' || url.pathname.endsWith('.html') || url.pathname === '/';
+
+  if (isHTML) {
+    // Network-first for HTML — always get the latest index.html
+    e.respondWith(
+      fetch(e.request)
+        .then(response => {
+          if (response && response.status === 200) {
+            const clone = response.clone();
+            caches.open(CACHE).then(cache => cache.put(e.request, clone));
+          }
+          return response;
+        })
+        .catch(() => caches.match(e.request))  // fallback to cache if offline
+    );
+  } else {
+    // Cache-first for everything else (fonts, icons, etc.)
+    e.respondWith(
+      caches.match(e.request).then(cached => {
+        if (cached) return cached;
+        return fetch(e.request).then(response => {
+          if (response && response.status === 200 && response.type !== 'opaque') {
+            const clone = response.clone();
+            caches.open(CACHE).then(cache => cache.put(e.request, clone));
+          }
+          return response;
+        }).catch(() => new Response('Offline', { status: 503 }));
+      })
+    );
+  }
 });
